@@ -11,7 +11,7 @@ real-time predictions.
 ## Project structure
 ```
 app.py                      Streamlit app (upload MRI -> class + confidence)
-Brain_Tumor_MRI_EDA.ipynb   EDA notebook (runs top-to-bottom)
+Brain_Tumor_MRI_EDA_.ipynb   EDA notebook (runs top-to-bottom)
 src/config.py               paths, image size, class names
 src/data.py                 tf.data loading + augmentation + class weights
 src/models.py               custom CNN + transfer-learning factories
