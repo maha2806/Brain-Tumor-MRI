@@ -1,46 +1,102 @@
-"""Re-split the dataset so no source image appears in more than one split.
+"""Check source-image overlap across dataset splits.
 
-The Roboflow export contains augmented copies of the same scan (same name before
-'_jpg.rf.<hash>') spread across train/valid/test. This script pools all images and
-re-splits them by source id (class-stratified), so test metrics are not inflated.
+The Roboflow export can contain augmented copies of the same source scan.
+This script identifies source IDs shared between train, validation and test
+splits so potential data leakage can be inspected.
 
-    python src/make_group_split.py            # writes data/Tumour_grouped/
-Then set DATA_DIR in src/config.py to data/Tumour_grouped.
+The source ID is derived from the filename before '_jpg.rf.<hash>'.
 """
+
 import re
-import shutil
-from collections import Counter
+from collections import defaultdict
+from pathlib import Path
 
-import numpy as np
-from sklearn.model_selection import StratifiedGroupKFold
+from Config import CLASS_NAMES, SPLITS, ROOT
 
-from config import DATA_DIR, ROOT, SEED
 
-OUT = ROOT / "data" / "Tumour_grouped"
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+}
+
+
+def source_id(filename: str) -> str:
+    """Extract the source-image ID from a Roboflow filename."""
+    return re.sub(r"_jpg\.rf\..*", "", filename)
+
+
+def collect_source_ids(data_dir: Path) -> dict[str, set[str]]:
+    """Collect source IDs present in each dataset split."""
+
+    split_sources = {}
+
+    for split in SPLITS:
+        split_path = data_dir / split
+        sources = set()
+
+        for class_name in CLASS_NAMES:
+            class_path = split_path / class_name
+
+            if not class_path.exists():
+                continue
+
+            for image_path in class_path.rglob("*"):
+                if (
+                    image_path.is_file()
+                    and image_path.suffix.lower() in IMAGE_EXTENSIONS
+                ):
+                    sources.add(source_id(image_path.name))
+
+        split_sources[split] = sources
+
+    return split_sources
+
+
+def find_cross_split_overlap(
+    split_sources: dict[str, set[str]],
+) -> dict[str, set[str]]:
+    """Find source IDs appearing in more than one dataset split."""
+
+    source_to_splits = defaultdict(set)
+
+    for split, sources in split_sources.items():
+        for source in sources:
+            source_to_splits[source].add(split)
+
+    return {
+        source: splits
+        for source, splits in source_to_splits.items()
+        if len(splits) > 1
+    }
 
 
 def main():
-    files = sorted(p for p in DATA_DIR.glob("*/*/*") if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
-    labels = np.array([p.parent.name for p in files])
-    groups = np.array([re.sub(r"_jpg\.rf\..*", "", p.name) for p in files])
-    # 10 folds: 1 -> test (~10%), 2 -> valid (~20%), 7 -> train (~70%)
-    fold = np.zeros(len(files), dtype=int)
-    for k, (_, idx) in enumerate(StratifiedGroupKFold(10, shuffle=True, random_state=SEED)
-                                 .split(files, labels, groups)):
-        fold[idx] = k
-    split_of = lambda k: "test" if k == 0 else "valid" if k in (1, 2) else "train"
-    if OUT.exists():
-        shutil.rmtree(OUT)
-    for p, lab, k in zip(files, labels, fold):
-        dst = OUT / split_of(k) / lab
-        dst.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(p, dst / p.name)
-    # sanity check: no group in two splits
-    seen = {}
-    for g, k in zip(groups, fold):
-        seen.setdefault(g, set()).add(split_of(k))
-    assert all(len(v) == 1 for v in seen.values()), "leakage remains!"
-    print("Written to", OUT, "| images per split:", dict(Counter(split_of(k) for k in fold)))
+    data_dir = ROOT / "Tumour"
+
+    split_sources = collect_source_ids(data_dir)
+    overlaps = find_cross_split_overlap(split_sources)
+
+    print("Source-image overlap check")
+    print("=" * 50)
+
+    for split, sources in split_sources.items():
+        print(f"{split}: {len(sources)} unique source IDs")
+
+    print()
+
+    if not overlaps:
+        print("No source-image overlap detected across splits.")
+        return
+
+    print(
+        f"Potential source-image leakage detected: "
+        f"{len(overlaps)} source IDs occur in multiple splits."
+    )
+
+    print("\nExamples:")
+    for source, splits in list(overlaps.items())[:20]:
+        print(f"  {source}: {', '.join(sorted(splits))}")
 
 
 if __name__ == "__main__":
